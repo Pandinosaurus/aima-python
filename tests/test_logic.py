@@ -1,7 +1,7 @@
 import pytest
 
-from logic import *
-from utils import expr_handle_infix_ops, count
+from aima.logic import *
+from aima.utils import expr_handle_infix_ops, count
 
 random.seed("aima-python")
 
@@ -156,6 +156,26 @@ def test_cdcl_satisfiable():
     assert cdcl_satisfiable(A | '<=>' | B) == {A: True, B: True}
     assert cdcl_satisfiable(A & ~B) == {A: True, B: False}
     assert cdcl_satisfiable(P & ~P) is False
+
+
+def test_dpll_branching_heuristics():
+    # every branching heuristic must still return a satisfying model on a SAT
+    # instance and report UNSAT on an unsatisfiable one
+    sat = (A | B | C) & (~A | ~B) & (~B | ~C) & (A | C)
+    for heuristic in (no_branching_heuristic, moms, momsf, posit, dlis, dlcs, jw, jw2, zm):
+        model = dpll_satisfiable(sat, branching_heuristic=heuristic)
+        assert model and pl_true(sat, model)
+        assert dpll_satisfiable(P & ~P, branching_heuristic=heuristic) is False
+
+
+def test_cdcl_restart_strategies():
+    # every restart strategy must still return a satisfying model on a SAT
+    # instance and report UNSAT on an unsatisfiable one
+    sat = (A | B | C) & (~A | ~B) & (~B | ~C) & (A | C) & (D | ~A) & (~D | B)
+    for restart_strategy in (no_restart, luby, glucose):
+        model = cdcl_satisfiable(sat, restart_strategy=restart_strategy)
+        assert model and pl_true(sat, model)
+        assert cdcl_satisfiable(P & ~P, restart_strategy=restart_strategy) is False
 
 
 def test_find_pure_symbol():
@@ -383,6 +403,50 @@ def test_SAT_plan():
                   (1, 0): {'Right': (1, 0), 'Up': (1, 0), 'Left': (1, 0), 'Down': (1, 0)},
                   (1, 1): {'Left': (1, 0), 'Up': (0, 1)}}
     assert SAT_plan((0, 0), transition, (1, 1), 4) == ['Right', 'Down']
+
+
+def test_hybrid_wumpus_agent_make_percept_sentence():
+    # a single square can yield several percepts at once (Stench *and* Breeze);
+    # the old elif-chain recorded only the first one
+    from aima.agents import Stench, Breeze
+    kb = WumpusKB(2)
+    kb.make_percept_sentence([Stench(), Breeze()], 0)
+    assert percept_stench(0) in kb.clauses
+    assert percept_breeze(0) in kb.clauses
+    assert ~percept_glitter(0) in kb.clauses
+
+
+def test_hybrid_wumpus_agent_plan_shot():
+    # plan_shot lines up with a possible wumpus and ends by shooting, using the
+    # same UP/DOWN/LEFT/RIGHT orientations as PlanRoute (it used to use EAST/WEST/…)
+    agent = HybridWumpusAgent(2)
+    actions = agent.plan_shot(WumpusPosition(1, 1, 'RIGHT'), [[2, 2]],
+                              [[1, 1], [2, 1], [1, 2], [2, 2]])
+    assert actions and actions[-1] == 'Shoot'
+
+
+def test_hybrid_wumpus_agent_plan_route_no_path():
+    # an unreachable / empty goal set yields an empty plan instead of crashing
+    agent = HybridWumpusAgent(2)
+    assert agent.plan_route(WumpusPosition(1, 1, 'RIGHT'), [], [[1, 1]]) == []
+
+
+def test_hybrid_wumpus_agent_first_action():
+    # end-to-end first step: from [1,1] (provably safe at t=0) the agent returns a
+    # legal action and records its pose. (Only t=0 is exercised: the propositional
+    # Fig 7.20 inference grows expensive as the temporal KB accumulates.)
+    agent = HybridWumpusAgent(2)
+    action = agent.program(None)
+    assert action in {'Forward', 'TurnLeft', 'TurnRight', 'Grab', 'Shoot', 'Climb'}
+    assert agent.current_position.get_location() == (1, 1)
+
+
+def test_gensym():
+    s1, s2, s3 = gensym(), gensym(), gensym()
+    assert len({s1, s2, s3}) == 3                         # all distinct
+    assert all(is_symbol(s.op) for s in (s1, s2, s3))     # genuine symbols
+    assert gensym('v_').op.startswith('v_')               # custom prefix
+    assert variables(s1 | s2) == {s1, s2}                 # usable in expressions
 
 
 if __name__ == '__main__':

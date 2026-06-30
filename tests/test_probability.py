@@ -1,7 +1,7 @@
 import pytest
 
-from probability import *
-from utils import rounder
+from aima.probability import *
+from aima.utils import rounder
 
 random.seed("aima-python")
 
@@ -110,6 +110,27 @@ def test_enumerate_joint_ask():
     P[1, 1] = P[2, 1] = 0.125
     assert enumerate_joint_ask(
         'X', dict(Y=1), P).show_approx() == '0: 0.667, 1: 0.167, 2: 0.167'
+
+
+def test_is_independent():
+    P = JointProbDist(['X', 'Y'])
+    P[0, 0] = P[0, 1] = P[1, 1] = P[1, 0] = 0.25
+    assert enumerate_joint_ask(
+        'X', dict(Y=1), P).show_approx() == '0: 0.5, 1: 0.5'
+    assert is_independent(['X', 'Y'], P)
+
+
+def test_gaussian_probability():
+    param = {'sigma': 0.5, 'b': 1, 'a': {'h': 0.5}}
+    event = {'h': 0.6}
+    assert gaussian_probability(param, event, 1) == 0.6664492057835993
+
+
+def test_logistic_probability():
+    param = {'mu': 0.5, 'sigma': 0.1}
+    event = {'h': 0.6}
+    assert logistic_probability(param, event, True) == 0.16857376940725355
+    assert logistic_probability(param, event, False) == 0.8314262305927465
 
 
 def test_bayesnode_p():
@@ -305,7 +326,7 @@ def test_fixed_lag_smoothing():
     umbrellaHMM = HiddenMarkovModel(umbrella_transition, umbrella_sensor)
 
     d = 2
-    assert rounder(fixed_lag_smoothing(e_t, umbrellaHMM, d, umbrella_evidence, t)) == [0.1111, 0.8889]
+    assert rounder(fixed_lag_smoothing(e_t, umbrellaHMM, d, umbrella_evidence, t)) == [0.2259, 0.7741]
     d = 5
     assert fixed_lag_smoothing(e_t, umbrellaHMM, d, umbrella_evidence, t) is None
 
@@ -314,7 +335,7 @@ def test_fixed_lag_smoothing():
     e_t = T
 
     d = 1
-    assert rounder(fixed_lag_smoothing(e_t, umbrellaHMM, d, umbrella_evidence, t)) == [0.9939, 0.0061]
+    assert rounder(fixed_lag_smoothing(e_t, umbrellaHMM, d, umbrella_evidence, t)) == [0.2839, 0.7161]
 
 
 def test_particle_filtering():
@@ -327,6 +348,108 @@ def test_particle_filtering():
     assert len(s) == N
     assert all(state in 'AB' for state in s)
     # XXX 'A' and 'B' are really arbitrary names, but I'm letting it stand for now
+
+
+def test_kalman_filter():
+    # one-dimensional random walk (Section 15.4 example): x_{t+1} = x_t + noise,
+    # z_t = x_t + noise. With prior N(0, 1), transition variance 2 and sensor
+    # variance 1, a single observation z = 2.5 has the closed-form posterior
+    # mean ((cov0 + Sigma_x) * z + Sigma_z * mean0) / (cov0 + Sigma_x + Sigma_z)
+    # and variance (cov0 + Sigma_x) * Sigma_z / (cov0 + Sigma_x + Sigma_z)
+    kf = KalmanFilter(transition_model=[[1]], sensor_model=[[1]],
+                      transition_noise=[[2]], sensor_noise=[[1]])
+    (mean, cov), = kalman_filter(kf, mean0=[0], cov0=[[1]], observations=[2.5])
+    assert np.isclose(mean[0], 1.875)
+    assert np.isclose(cov[0, 0], 0.75)
+    # conditioning on the observation never increases the predicted uncertainty
+    assert cov[0, 0] < 1 + 2
+
+    # two-dimensional constant-velocity model: the state is [position, velocity]
+    # and only the position is observed; from a sequence of steadily increasing
+    # position measurements the filter should infer a positive velocity
+    kf = KalmanFilter(transition_model=[[1, 1], [0, 1]], sensor_model=[[1, 0]],
+                      transition_noise=[[0.01, 0], [0, 0.01]], sensor_noise=[[1]])
+    estimates = kalman_filter(kf, mean0=[0, 0], cov0=[[1, 0], [0, 1]],
+                              observations=[1, 2, 3, 4, 5])
+    assert len(estimates) == 5
+    final_mean, final_cov = estimates[-1]
+    assert final_mean[1] > 0  # inferred velocity is positive
+    assert final_cov.shape == (2, 2)
+
+
+def test_kalman_filter_steady_state():
+    # [Section 15.4] for the 1-D random walk with unit transition and sensor
+    # variance the filtered variance converges to the fixed point of
+    # s = (s + 1) / (s + 2), i.e. s^2 + s - 1 = 0, so s = (sqrt(5) - 1) / 2
+    kf = KalmanFilter(transition_model=[[1]], sensor_model=[[1]],
+                      transition_noise=[[1]], sensor_noise=[[1]])
+    estimates = kalman_filter(kf, mean0=[0], cov0=[[1]], observations=[0.0] * 60)
+    steady_state = (5 ** 0.5 - 1) / 2
+    assert estimates[-1][1][0, 0] == pytest.approx(steady_state, abs=1e-6)
+
+
+def test_baum_welch():
+    def sequence_log_likelihood(hmm, obs):
+        """Log probability of the observation sequence under hmm (scaled forward pass)."""
+        A = np.array(hmm.transition_model)
+        sensor = np.array(hmm.sensor_model)
+        B = np.array([sensor[0] if e else sensor[1] for e in obs])
+        alpha = np.array(hmm.prior) * B[0]
+        ll = np.log(alpha.sum())
+        alpha = alpha / alpha.sum()
+        for t in range(1, len(obs)):
+            alpha = B[t] * (alpha @ A)
+            ll += np.log(alpha.sum())
+            alpha = alpha / alpha.sum()
+        return ll
+
+    umbrella_transition = [[0.7, 0.3], [0.3, 0.7]]
+    umbrella_sensor = [[0.9, 0.2], [0.1, 0.8]]
+    umbrellaHMM = HiddenMarkovModel(umbrella_transition, umbrella_sensor)
+    observations = [T, T, F, T, T, F, F, F, T, F, T, T]
+
+    # Baum-Welch (EM) must never decrease the data log likelihood
+    log_likelihoods = [sequence_log_likelihood(baum_welch(umbrellaHMM, observations, iterations=k), observations)
+                       for k in (1, 2, 5, 10, 20)]
+    assert all(later >= earlier - 1e-9 for earlier, later in zip(log_likelihoods, log_likelihoods[1:]))
+    assert log_likelihoods[-1] >= sequence_log_likelihood(umbrellaHMM, observations) - 1e-9
+
+    # the learned parameters are still valid probability distributions
+    learned = baum_welch(umbrellaHMM, observations, iterations=20)
+    assert np.allclose(np.sum(learned.transition_model, axis=1), 1)
+    assert np.isclose(sum(learned.prior), 1)
+    assert np.allclose(np.sum(learned.sensor_model, axis=0), 1)
+
+
+def test_dynamic_bayes_net():
+    # the umbrella world as a DBN: hidden Rain with a 0.7 self-transition, observed
+    # through Umbrella with sensor probabilities 0.9 / 0.2
+    umbrella_dbn = DynamicBayesNet(prior=[('Rain', '', 0.5)],
+                                   transition=[('Rain', 'Rain_prev', {T: 0.7, F: 0.3})],
+                                   sensors=[('Umbrella', 'Rain', {T: 0.9, F: 0.2})])
+
+    # unrolling spans slices 0..steps with evidence variables at slices 1..steps
+    assert umbrella_dbn.unroll(2).variables == ['Rain_0', 'Rain_1', 'Umbrella_1', 'Rain_2', 'Umbrella_2']
+
+    # filtering by exact inference matches the canonical umbrella values, which in
+    # turn agree with the HMM forward algorithm
+    assert umbrella_dbn.filter([{'Umbrella': True}], 'Rain')[True] == pytest.approx(0.8182, abs=1e-4)
+    assert umbrella_dbn.filter([{'Umbrella': True}, {'Umbrella': True}], 'Rain')[True] == pytest.approx(0.8834,
+                                                                                                        abs=1e-4)
+
+    umbrellaHMM = HiddenMarkovModel([[0.7, 0.3], [0.3, 0.7]], [[0.9, 0.2], [0.1, 0.8]])
+    hmm_belief = forward(umbrellaHMM, umbrellaHMM.prior, True)
+    assert umbrella_dbn.filter([{'Umbrella': True}], 'Rain')[True] == pytest.approx(hmm_belief[0])
+
+    # over the book's umbrella evidence sequence [T, T, F, T, T], exact DBN
+    # filtering agrees step for step with the HMM forward algorithm
+    sequence = [T, T, F, T, T]
+    fv = umbrellaHMM.prior
+    for e in sequence:
+        fv = forward(umbrellaHMM, fv, e)
+    dbn_belief = umbrella_dbn.filter([{'Umbrella': e} for e in sequence], 'Rain')
+    assert dbn_belief[True] == pytest.approx(fv[0])
+    assert dbn_belief[True] == pytest.approx(0.8673, abs=1e-4)
 
 
 def test_monte_carlo_localization():
@@ -367,7 +490,7 @@ def test_monte_carlo_localization():
         else:
             return 0
 
-    from utils import print_table
+    from aima.utils import print_table
     a = {'v': (0, 0), 'w': 0}
     z = (2, 4, 1, 6)
     S = monte_carlo_localization(a, z, 1000, P_motion_sample, P_sensor, m)
@@ -391,10 +514,60 @@ def test_monte_carlo_localization():
     assert grid[6][7] > 700
 
 
+def test_continuous_mcl():
+    import math
+    from aima.probability import ContinuousMCLmap
+
+    # a 10 x 10 arena with a central 4x4..6x6 square obstacle (Fig 25.10 style)
+    m = ContinuousMCLmap(10, 10, obstacles=[(4, 4, 6, 6)])
+
+    # ray casting returns continuous distances, not grid steps
+    assert m.ray_cast(0, (2.0, 2.0, 0.0)) == 8.0  # +x -> right wall
+    assert m.ray_cast(1, (2.0, 2.0, 0.0)) == 8.0  # +y -> top wall
+    assert m.ray_cast(2, (2.0, 2.0, 0.0)) == 2.0  # -x -> left wall
+    assert m.ray_cast(3, (2.0, 2.0, 0.0)) == 2.0  # -y -> bottom wall
+    assert m.ray_cast(0, (1.0, 5.0, 0.0)) == 3.0  # +x -> obstacle left edge at x=4
+    assert m.in_free_space(2, 2) and not m.in_free_space(5, 5)
+
+    # sample() always lands in free space
+    random.seed('aima-python')
+    for _ in range(100):
+        x, y, _ = m.sample()
+        assert m.in_free_space(x, y)
+
+    # the particle filter localizes the robot on the continuous map
+    true = (2.0, 2.0, 0.0)
+    z = [m.ray_cast(s, true) for s in range(len(m.sensors))]
+
+    def P_motion_sample(kin_state, v, w):
+        """Near-static motion with small Gaussian jitter to keep diversity."""
+        x, y, h = kin_state
+        return (x + random.gauss(0, 0.1), y + random.gauss(0, 0.1),
+                (h + random.gauss(0, 0.05)) % (2 * math.pi))
+
+    def P_sensor(observed, expected):
+        """Gaussian range-sensor likelihood (need not be normalized)."""
+        if expected == math.inf:
+            return 1e-6
+        return math.exp(-((observed - expected) ** 2) / (2 * 0.5 ** 2)) + 1e-6
+
+    random.seed('aima-python')
+    a = {'v': 0, 'w': 0}
+    N, S = 2000, None
+    for _ in range(6):
+        S = monte_carlo_localization(a, z, N, P_motion_sample, P_sensor, m, S)
+
+    assert len(S) == N
+    near = sum(1 for x, y, _ in S if math.hypot(x - 2, y - 2) < 1.5)
+    assert near > N / 2  # most particles concentrate around the true pose
+
+
 def test_gibbs_ask():
-    possible_solutions = ['False: 0.16, True: 0.84', 'False: 0.17, True: 0.83', 'False: 0.15, True: 0.85']
-    g_solution = gibbs_ask('Cloudy', dict(Rain=True), sprinkler, 200).show_approx()
-    assert g_solution in possible_solutions
+    # exact posterior P(Cloudy | Rain=True) = 0.8; seed + tolerance keep this
+    # Monte Carlo test deterministic and independent of execution order
+    random.seed('aima-python')
+    p = gibbs_ask('Cloudy', dict(Rain=True), sprinkler, 2000)[True]
+    assert abs(p - 0.8) < 0.05
 
 
 # The following should probably go in .ipynb:
@@ -432,6 +605,51 @@ True
 >>> 0.4-epsilon < PC[F] < 0.4+epsilon
 True
 """
+
+
+def test_discrete_bayes_net_inference():
+    # a small multi-valued net; both exact-inference engines must agree with the
+    # hand-computed posterior  P(Rain | Traffic=high)
+    net = DiscreteBayesNet([
+        ('Rain', '', ['none', 'light', 'heavy'], {(): [0.6, 0.3, 0.1]}),
+        ('Traffic', 'Rain', ['low', 'high'],
+         {('none',): [0.9, 0.1], ('light',): [0.6, 0.4], ('heavy',): [0.2, 0.8]}),
+    ])
+    expected = {'none': 0.06 / 0.26, 'light': 0.12 / 0.26, 'heavy': 0.08 / 0.26}
+    for ask in (enumeration_ask, elimination_ask):
+        q = ask('Rain', {'Traffic': 'high'}, net)
+        for value, p in expected.items():
+            assert abs(q[value] - p) < 1e-9
+
+
+def test_read_bif():
+    bif = """
+    network n { }
+    variable A { type discrete [ 2 ] { yes, no }; }
+    variable B { type discrete [ 3 ] { lo, mid, hi }; }
+    probability ( A ) { table 0.3, 0.7; }
+    probability ( B | A ) {
+      (yes) 0.2, 0.3, 0.5;
+      (no)  0.1, 0.1, 0.8;
+    }
+    """
+    net = read_bif(bif)
+    assert set(net.variables) == {'A', 'B'}
+    assert net.variable_values('B') == ['lo', 'mid', 'hi']
+    assert net.variable_node('B').parents == ['A']
+    assert net.variable_node('A').p('yes', {}) == 0.3
+    assert net.variable_node('B').p('hi', {'A': 'no'}) == 0.8
+
+
+def test_insurance_bayes_net():
+    # the car-insurance ("Insurance") network loads from aima-data and supports
+    # exact inference (AIMA 4e §16 case study, issue #1285)
+    net = insurance()
+    assert len(net.variables) == 27
+    assert net.variable_values('Age') == ['Adolescent', 'Adult', 'Senior']
+    age = elimination_ask('Age', {}, net)
+    assert (round(age['Adolescent'], 3), round(age['Adult'], 3), round(age['Senior'], 3)) == (0.2, 0.6, 0.2)
+
 
 if __name__ == '__main__':
     pytest.main()

@@ -1,5 +1,6 @@
 import pytest
-from search import *
+from aima.search import *
+from aima.logic import WumpusPosition
 
 random.seed("aima-python")
 
@@ -81,6 +82,55 @@ def test_astar_search():
                                                      'LEFT', 'DOWN', 'RIGHT', 'RIGHT']
     assert astar_search(EightPuzzle((1, 2, 3, 4, 5, 6, 0, 7, 8))).solution() == ['RIGHT', 'RIGHT']
     assert astar_search(n_queens).solution() == [7, 1, 3, 0, 6, 4, 2, 5]
+
+
+def test_tree_search_variants():
+    # n-queens is tree-structured (one queen per column, no repeated states), so
+    # the tree variants explore exactly like the graph ones and find the same solution
+    assert astar_tree_search(n_queens).solution() == astar_search(n_queens).solution()
+    # on Romania (a cyclic graph) cost-bounded tree search still terminates and
+    # returns the optimal path, matching the graph versions
+    assert uniform_cost_tree_search(romania_problem).solution() == ['Sibiu', 'Rimnicu', 'Pitesti', 'Bucharest']
+    assert astar_tree_search(romania_problem).solution() == ['Sibiu', 'Rimnicu', 'Pitesti', 'Bucharest']
+    assert astar_tree_search(romania_problem).path_cost == 418
+    # the greedy tree-search alias mirrors greedy_best_first_graph_search
+    assert greedy_best_first_tree_search is best_first_tree_search
+
+
+def test_iterative_deepening_astar_search():
+    # IDA* is optimal, so it returns a solution of the same cost as A*.
+    assert iterative_deepening_astar_search(romania_problem).solution() == ['Sibiu', 'Rimnicu', 'Pitesti', 'Bucharest']
+    assert (iterative_deepening_astar_search(eight_puzzle).path_cost ==
+            astar_search(eight_puzzle).path_cost)
+    assert iterative_deepening_astar_search(EightPuzzle((1, 2, 3, 4, 5, 6, 0, 7, 8))).solution() == ['RIGHT', 'RIGHT']
+
+
+def test_traveling_salesman():
+    cities = {0: (0, 0), 1: (0, 1), 2: (1, 1), 3: (1, 0), 4: (0.5, 2)}
+    tsp = TravelingSalesman(cities, initial=(0,))
+    solution = astar_search(tsp).state
+    # a valid tour starts and ends at the start city and visits every city once
+    assert solution[0] == solution[-1] == 0
+    assert set(solution) == set(cities)
+    # the MST heuristic is admissible, so A* finds the optimal tour cost
+    assert tsp.value(solution) == pytest.approx(3 + 5 ** 0.5)
+
+
+def test_pour_problem():
+    # the classic two-jug puzzle: with jugs of capacity 3 and 5, measure out 4
+    problem = PourProblem(initial=(0, 0), goals={4}, capacities=(3, 5))
+    solution = breadth_first_graph_search(problem)
+    assert solution is not None
+    assert any(level == 4 for level in solution.state)
+
+
+def test_n_puzzle():
+    # NPuzzle generalizes EightPuzzle; a one-move-from-goal 3x3 instance is solved by A*
+    npuzzle = NPuzzle(initial=(1, 2, 3, 4, 5, 6, 0, 7, 8), size=3, shuffle=0)
+    assert astar_search(npuzzle).solution() == ['RIGHT', 'RIGHT']
+    # a shuffled instance is always solvable and reaches the goal
+    solved = astar_search(NPuzzle(size=3, shuffle=15))
+    assert solved is not None
 
 
 def test_find_blank_square():
@@ -235,10 +285,25 @@ def test_and_or_graph_search():
 
 def test_online_dfs_agent():
     odfs_agent = OnlineDFSAgent(LRTA_problem)
-    keys = [key for key in odfs_agent('State_3')]
-    assert keys[0] in ['Right', 'Left']
-    assert keys[1] in ['Right', 'Left']
+    # each call returns a single legal action (or None at the goal)
+    first = odfs_agent('State_3')
+    assert first in ['Right', 'Left']
     assert odfs_agent('State_5') is None
+
+    # driving the agent through the environment must reach the goal and stop,
+    # only ever issuing actions that are legal in the current state
+    odfs_agent = OnlineDFSAgent(LRTA_problem)
+    graph_dict = one_dim_state_space.graph_dict
+    state = LRTA_problem.initial
+    action = odfs_agent(state)
+    for _ in range(40):
+        if action is None:
+            break
+        assert action in graph_dict[state]
+        state = graph_dict[state][action]
+        action = odfs_agent(state)
+    assert state == LRTA_problem.goal
+    assert action is None
 
 
 def test_LRTAStarAgent():
@@ -317,7 +382,7 @@ def GA_GraphColoringInts(edges, fitness):
     return genetic_algorithm(population, fitness)
 
 
-def test_simpleProblemSolvingAgent():
+def test_simple_problem_solving_agent():
     class vacuumAgent(SimpleProblemSolvingAgentProgram):
         def update_state(self, state, percept):
             return percept
@@ -391,6 +456,85 @@ DIET LENT NETS NIL NIT SETAL LATS TARE ARE SATI'
 >>> boggle_hill_climbing(list('ABCDEFGHI'), verbose=False)
 (['E', 'P', 'R', 'D', 'O', 'A', 'G', 'S', 'T'], 123)
 """
+
+def test_plan_route():
+    dim = 4
+    allowed = [[i, j] for i in range(1, dim + 1) for j in range(1, dim + 1)]
+    start = WumpusPosition(1, 1, 'UP')
+
+    # a route to a goal cell: the planned actions must actually reach it
+    problem = PlanRoute(start, [[3, 3]], allowed, dim)
+    state = start
+    for action in astar_search(problem).solution():
+        state = problem.result(state, action)
+    assert list(state.get_location()) == [3, 3]
+    # the A* search must not mutate the initial state
+    assert start.get_location() == (1, 1) and start.get_orientation() == 'UP'
+
+    # a position goal also constrains the final orientation
+    problem = PlanRoute(start, [WumpusPosition(2, 1, 'RIGHT')], allowed, dim)
+    state = start
+    for action in astar_search(problem).solution():
+        state = problem.result(state, action)
+    assert state.get_location() == (2, 1) and state.get_orientation() == 'RIGHT'
+
+    # forward into a cell that is not allowed (unsafe) leaves the agent in place
+    problem = PlanRoute(start, [[2, 2]], [[1, 1]], dim)
+    assert problem.result(WumpusPosition(1, 1, 'RIGHT'), 'Forward').get_location() == (1, 1)
+
+
+def test_grid_problem():
+    # 5x5 grid with a wall blocking the direct route (gap at y=4)
+    walls = [(2, y) for y in range(4)]
+    problem = GridProblem((0, 0), (4, 0), 5, 5, obstacles=walls)
+    astar = astar_search(problem)
+    bfs = breadth_first_graph_search(problem)
+    assert astar is not None
+    assert astar.path_cost == bfs.path_cost                            # both optimal
+    assert all(problem.passable(node.state) for node in astar.path())  # avoids walls
+    # a goal walled off on every side is unreachable
+    boxed = GridProblem((0, 0), (4, 4), 5, 5, obstacles=[(3, 4), (4, 3)])
+    assert astar_search(boxed) is None
+
+
+def test_grid_search_visualization():
+    import matplotlib
+    matplotlib.use('Agg')
+    from aima.notebook_utils import grid_search_steps, plot_grid_search
+    walls = [(3, y) for y in range(7)]
+    problem = GridProblem((0, 0), (6, 0), 10, 10, obstacles=walls)
+    expl_bfs, path_bfs = grid_search_steps(problem, 'bfs')
+    expl_astar, path_astar = grid_search_steps(problem, 'astar')
+    assert path_bfs[0] == path_astar[0] == (0, 0)
+    assert path_bfs[-1] == path_astar[-1] == (6, 0)
+    assert len(path_astar) == len(path_bfs)            # same optimal path length
+    assert len(expl_astar) <= len(expl_bfs)            # informed search is more focused
+    assert plot_grid_search(problem, expl_astar, path_astar) is not None
+
+
+def test_local_search_variants():
+    # a unimodal grid (value = x + y + 1, single peak at (2, 2)): every local-search
+    # variant climbs to it. These algorithms have no pseudocode in the book (#1151).
+    random.seed(0)
+    grid = [[1, 2, 3], [2, 3, 4], [3, 4, 5]]
+    assert stochastic_hill_climbing(PeakFindingProblem((0, 0), grid)) == (2, 2)
+    assert first_choice_hill_climbing(PeakFindingProblem((0, 0), grid)) == (2, 2)
+    assert local_beam_search(PeakFindingProblem((0, 0), grid), k=3) == (2, 2)
+    n, m = len(grid), len(grid[0])
+    best = random_restart_hill_climbing(
+        PeakFindingProblem((0, 0), grid),
+        lambda: (random.randrange(n), random.randrange(m)), restarts=5)
+    assert best == (2, 2)
+
+
+def test_node_path_states():
+    # the full root->goal path is one call away from the returned Node (#1068)
+    node = astar_search(GraphProblem('Arad', 'Bucharest', romania_map))
+    states = node.path_states()
+    assert states == [n.state for n in node.path()]
+    assert states[0] == 'Arad' and states[-1] == 'Bucharest'
+    assert len(node.solution()) == len(states) - 1   # actions are the path's edges
+
 
 if __name__ == '__main__':
     pytest.main()

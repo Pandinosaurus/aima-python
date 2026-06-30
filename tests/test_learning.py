@@ -1,6 +1,6 @@
 import pytest
 
-from learning import *
+from aima.learning import *
 
 random.seed("aima-python")
 
@@ -114,6 +114,14 @@ def test_neural_network_learner():
     assert err_ratio(nnl, iris) < 0.21
 
 
+def test_linear_learner():
+    iris = DataSet(name="iris")
+    iris.classes_to_numbers()
+    # both linear learners should train and produce a numeric prediction without shape errors
+    assert isinstance(float(LinearLearner(iris)(iris.examples[0][:-1])), float)
+    assert isinstance(float(LogisticLinearLeaner(iris)(iris.examples[0][:-1])), float)
+
+
 def test_perceptron():
     iris = DataSet(name='iris')
     iris.classes_to_numbers()
@@ -151,6 +159,78 @@ def test_ada_boost():
              ([7, 3, 6, 2.5], 2)]
     assert grade_learner(ab, tests) > 2 / 3
     assert err_ratio(ab, iris) < 0.25
+
+
+def test_gaussian_mixture_em():
+    np.random.seed(42)
+    # two well-separated 2-D Gaussian blobs around (0, 0) and (10, 10)
+    blob1 = np.random.randn(100, 2) + [0, 0]
+    blob2 = np.random.randn(100, 2) + [10, 10]
+    data = np.vstack([blob1, blob2])
+
+    model = gaussian_mixture_em(data, k=2)
+
+    # the two recovered means should match the two true cluster centers (in some order)
+    means = sorted(model['means'].tolist())
+    assert np.allclose(means[0], [0, 0], atol=0.5)
+    assert np.allclose(means[1], [10, 10], atol=0.5)
+    # the mixture weights are roughly balanced and sum to 1
+    assert np.isclose(model['weights'].sum(), 1)
+    assert np.allclose(model['weights'], 0.5, atol=0.1)
+    # every point is assigned (with highest responsibility) to its own cluster
+    labels = model['responsibilities'].argmax(axis=1)
+    assert labels[0] != labels[-1]
+    assert len(set(labels[:100])) == 1 and len(set(labels[100:])) == 1
+
+
+def test_naive_bayes_em():
+    np.random.seed(42)
+    # the 'two bags of candy' example (Section 20.3.2): bag 1 mostly has cherry
+    # flavour, red wrapper and a hole (each feature true with prob 0.8), bag 2 is
+    # the opposite (each feature true with prob 0.3); the bag is hidden
+    bag1 = (np.random.rand(1000, 3) < 0.8).astype(int)
+    bag2 = (np.random.rand(1000, 3) < 0.3).astype(int)
+    candies = np.vstack([bag1, bag2])
+
+    model = naive_bayes_em(candies, k=2)
+
+    # recover the two bags (sorted by how 'cherry/red/holed' they are to undo the
+    # arbitrary labelling of the hidden classes)
+    components = sorted(model['probabilities'].tolist(), key=lambda p: sum(p))
+    assert np.allclose(components[0], [0.3, 0.3, 0.3], atol=0.1)  # bag 2
+    assert np.allclose(components[1], [0.8, 0.8, 0.8], atol=0.1)  # bag 1
+    # the two bags were mixed in equal proportions and the priors sum to 1
+    assert np.isclose(model['weights'].sum(), 1)
+    assert np.allclose(model['weights'], 0.5, atol=0.1)
+
+
+def test_decision_list_learner():
+    restaurant = DataSet(name="restaurant")
+    dll = DecisionListLearner(restaurant)
+    # the learned decision list is consistent with the (discrete) training data
+    assert err_ratio(dll, restaurant) == 0
+    assert all(dll(example) == example[restaurant.target] for example in restaurant.examples)
+    # each rule is a (conjunctive test, outcome) pair, ending in the empty catch-all
+    assert all(isinstance(test, tuple) for test, _ in dll.decision_list)
+    assert dll.decision_list[-1][0] == ()
+
+
+def test_cross_validation():
+    random.seed("aima-python")
+    iris = DataSet(name="iris")
+
+    # adapt k-NN to the (dataset, size) interface cross_validation expects,
+    # cross-validating over the neighbourhood size
+    def knn(dataset, size):
+        return NearestNeighborLearner(dataset, k=size or 1)
+
+    err_train, err_val = cross_validation(knn, iris, size=3, k=5)
+    # both are error ratios in [0, 1]; on iris k-NN generalizes well, so the
+    # validation error stays well below chance (~0.67 for 3 classes). Loose
+    # bounds are used on purpose -- the exact value depends on the shuffle.
+    assert 0.0 <= err_train <= 1.0
+    assert 0.0 <= err_val < 0.5
+    assert err_val >= err_train  # validation error should not beat training error
 
 
 if __name__ == "__main__":

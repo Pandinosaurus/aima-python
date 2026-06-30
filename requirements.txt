@@ -1,5 +1,5 @@
 cvxopt
-image
+graphviz
 ipython
 ipythonblocks
 ipywidgets
@@ -8,9 +8,10 @@ keras
 matplotlib
 networkx
 numpy
-opencv-python
+opencv-contrib-python
 pandas
 pillow
+pytest
 pytest-cov
 qpsolvers
 scipy
